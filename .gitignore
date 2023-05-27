@@ -1,0 +1,4 @@
+/target
+.ruc
+tests/bats
+tests/repo
