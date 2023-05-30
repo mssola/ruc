@@ -76,6 +76,26 @@ fn cli() -> Command {
                         .required(true),
                 ),
         )
+        .subcommand(
+            // TODO: yeah, there's plenty to do here ;)
+            Command::new("tag")
+                .about("Create, list or delete a tag object")
+                .subcommand(
+                    Command::new("-a")
+                        .about("Make an unsigned annotated tag")
+                        .arg(
+                            arg!(<name> "Name of the tag")
+                                .value_parser(clap::value_parser!(String))
+                                .required(true),
+                        )
+                        .arg(
+                            arg!([commit] "Commit ID to tag")
+                                .value_parser(clap::value_parser!(String))
+                                .default_value("HEAD")
+                                .required(false),
+                        ),
+                ),
+        )
 }
 
 fn main() {
@@ -98,14 +118,20 @@ fn main() {
             );
         }
         Some(("cat-file", sm)) => {
-            object::cat(sm.get_one::<String>("object").unwrap());
+            let working_dir = init::working_dir();
+            let oid = commit::ref_to_oid(&working_dir, sm.get_one::<String>("object").unwrap());
+
+            object::cat(&oid);
         }
         Some(("write-tree", _sm)) => {
             let cur = std::env::current_dir().unwrap();
             tree::write_tree(cur.as_path());
         }
         Some(("read-tree", sm)) => {
-            tree::read_tree(sm.get_one::<String>("tree").unwrap());
+            let working_dir = init::working_dir();
+            let oid = commit::ref_to_oid(&working_dir, sm.get_one::<String>("tree").unwrap());
+
+            tree::read_tree(&oid);
         }
         Some(("commit", sm)) => {
             let message = match sm.get_one::<String>("message") {
@@ -122,11 +148,12 @@ fn main() {
             commit::commit(message);
         }
         Some(("log", sm)) => {
+            let working_dir = init::working_dir();
+
             let revision = match sm.get_one::<String>("from") {
-                Some(v) => v.to_owned(),
+                Some(v) => commit::ref_to_oid(&working_dir, v),
                 None => {
-                    let working_dir = init::working_dir();
-                    let revision = commit::get_head(&working_dir);
+                    let revision = commit::get_ref(&working_dir, &String::from("HEAD"));
 
                     if revision.is_empty() {
                         println!("fatal: current branch has no commit yet");
@@ -140,8 +167,27 @@ fn main() {
             commit::log(&revision);
         }
         Some(("checkout", sm)) => {
-            commit::checkout(sm.get_one::<String>("commit").unwrap());
+            let working_dir = init::working_dir();
+            let oid = commit::ref_to_oid(&working_dir, sm.get_one::<String>("commit").unwrap());
+
+            commit::checkout(&oid);
         }
+        Some(("tag", sub)) => match sub.subcommand() {
+            Some(("-a", sm)) => {
+                let mut commit = sm.get_one::<String>("commit").unwrap().to_owned();
+                if commit == "HEAD" {
+                    let working_dir = init::working_dir();
+                    commit = commit::get_ref(&working_dir, &String::from("HEAD"));
+                }
+
+                commit::create_tag(sm.get_one::<String>("name").unwrap(), &commit);
+            }
+            Some((command, _)) => {
+                println!("unknown option {} for the 'tag' command", command);
+                std::process::exit(1);
+            }
+            _ => unreachable!(),
+        },
         Some((command, _)) => {
             println!(
                 "ruc: «{}» is not a valid command. See «ruc --help».",

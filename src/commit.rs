@@ -41,14 +41,14 @@ pub fn commit(message: String) {
 
     match tree::traverse_write_tree(&working_dir, &working_dir) {
         Ok(id) => {
-            let parent_id = get_head(&working_dir);
+            let parent_id = get_ref(&working_dir, &String::from("HEAD"));
             let contents = if parent_id.is_empty() {
                 format!("tree {}\n\n{}", id, message)
             } else {
                 format!("tree {}\nparent {}\n\n{}", id, parent_id, message)
             };
             let commit_id = object::hash_contents(&contents, object::Kind::Commit);
-            set_head(&working_dir, &commit_id);
+            update_ref(&working_dir, &String::from("HEAD"), &commit_id);
         }
         Err(e) => println!(
             "commit: fatal: left inconsistent because of the error: {}",
@@ -57,30 +57,41 @@ pub fn commit(message: String) {
     }
 }
 
-pub fn get_head(working_dir: &Path) -> String {
-    let head_file = working_dir.join(init::RUC_DIR).join("HEAD");
+pub fn ref_to_oid(working_dir: &Path, name: &String) -> String {
+    for path in &["", "refs/", "refs/tags/", "refs/heads/"] {
+        let full_path = working_dir.join(init::RUC_DIR).join(path).join(name);
 
-    match std::fs::read_to_string(head_file) {
+        if full_path.exists() {
+            return get_ref(working_dir, &format!("{}{}", path, name));
+        }
+    }
+    name.to_owned()
+}
+
+pub fn get_ref(working_dir: &Path, name: &String) -> String {
+    let ref_file = working_dir.join(init::RUC_DIR).join(name);
+
+    match std::fs::read_to_string(ref_file) {
         Ok(contents) => contents,
         Err(e) => match e.kind() {
             std::io::ErrorKind::NotFound => String::new(),
             _ => {
-                println!("fatal: could not get the current value for HEAD!");
+                println!("fatal: could not get the current value for {}!", name);
                 std::process::exit(1);
             }
         },
     }
 }
 
-pub fn set_head(working_dir: &Path, commit_id: &String) {
-    let head_file = working_dir.join(init::RUC_DIR).join("HEAD");
+pub fn update_ref(working_dir: &Path, name: &String, commit_id: &String) {
+    let ref_file = working_dir.join(init::RUC_DIR).join(name);
 
-    let mut file = fs::File::create(head_file).unwrap_or_else(|e| {
-        println!("could not save HEAD state: {}", e);
+    let mut file = fs::File::create(ref_file).unwrap_or_else(|e| {
+        println!("could not save {} state: {}", name, e);
         std::process::exit(1);
     });
     file.write_all(commit_id.as_bytes()).unwrap_or_else(|e| {
-        println!("could not save HEAD state: {}", e);
+        println!("could not save {} state: {}", name, e);
         std::process::exit(1);
     });
 }
@@ -155,11 +166,17 @@ pub fn checkout(id: &String) {
     match res {
         Ok(commit) => {
             tree::read_tree(&commit.tree);
-            set_head(&working_dir, id);
+            update_ref(&working_dir, &String::from("HEAD"), id);
         }
         Err(e) => {
             println!("{}", e);
             std::process::exit(1);
         }
     }
+}
+
+pub fn create_tag(name: &String, id: &String) {
+    let working_dir = init::working_dir();
+
+    update_ref(&working_dir, &format!("refs/tags/{}", name), id);
 }

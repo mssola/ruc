@@ -81,3 +81,17 @@ setup() {
     [ "$(cat b.txt)" = "b1" ]
     [ "$(cat .ruc/HEAD)" = "${sha1}" ]
 }
+
+@test "tag creates an annotated name for the given commit" {
+    ruc commit -m "First"
+    sha1=$(ruc log | head -n 1 | awk '{ print $2; }')
+
+    ruc commit -m "Second"
+    sha2=$(ruc log | head -n 1 | awk '{ print $2; }')
+
+    ruc tag -a second
+    ruc tag -a first "${sha1}"
+
+    [ "$(cat .ruc/HEAD)" = "$(cat .ruc/refs/tags/second)" ]
+    [ "${sha1}" = "$(cat .ruc/refs/tags/first)" ]
+}

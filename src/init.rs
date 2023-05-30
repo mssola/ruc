@@ -37,6 +37,10 @@ pub fn init(directory: &Path) {
         .unwrap_or_else(|e| panic!("Could not create directory: {}", e));
     std::fs::create_dir_all(directory.join(RUC_DIR).join("objects"))
         .unwrap_or_else(|e| panic!("Could not create directory: {}", e));
+    std::fs::create_dir_all(directory.join(RUC_DIR).join("refs").join("tags"))
+        .unwrap_or_else(|e| panic!("Could not create directory: {}", e));
+    std::fs::create_dir_all(directory.join(RUC_DIR).join("refs").join("heads"))
+        .unwrap_or_else(|e| panic!("Could not create directory: {}", e));
 
     println!(
         "Initialized empty Ruc repository in {}",
