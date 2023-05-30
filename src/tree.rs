@@ -11,7 +11,7 @@ use std::str::FromStr;
 
 fn should_be_ignored(entry: &DirEntry, working_dir: &Path) -> bool {
     // TODO: pass along an "option" struct that is passed through all commands.
-    let ignored_entries = vec![".ruc", ".git", "target"];
+    let ignored_entries = vec![".ruc", ".git", "target", "tests"];
     let path = entry.path();
 
     match path.strip_prefix(working_dir) {
@@ -39,7 +39,7 @@ pub struct TreeEntry {
     path: String,
 }
 
-fn traverse_write_tree(path: &Path, working_dir: &Path) -> std::io::Result<String> {
+pub fn traverse_write_tree(path: &Path, working_dir: &Path) -> std::io::Result<String> {
     let mut entries: Vec<TreeEntry> = vec![];
 
     for entry in fs::read_dir(path)? {
@@ -79,7 +79,7 @@ fn traverse_write_tree(path: &Path, working_dir: &Path) -> std::io::Result<Strin
     // Bundle all the entries that have been found (both trees and blobs), and
     // store it into a tree kind. The return value on success for this function
     // will be the ID for this newly generated tree file.
-    let contents: String = entries.iter().fold(String::new(), |a, b| {
+    let contents = entries.iter().fold(String::new(), |a, b| {
         a + &format!("{} {} {}", b.kind, b.id, b.path) + "\n"
     });
 
@@ -125,8 +125,6 @@ fn get_entries(contents: &str) -> Result<Vec<TreeEntry>, std::io::Error> {
 }
 
 pub fn read_blob(blob: &TreeEntry) -> std::io::Result<()> {
-    println!("{:?}", blob);
-
     // TODO: properly handle the error...
     let obj = object::get(&blob.id).unwrap_or_else(|e| {
         println!("read-tree: failed to read blob: {}", e);

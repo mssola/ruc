@@ -1,3 +1,4 @@
+mod commit;
 mod init;
 mod object;
 mod tree;
@@ -49,6 +50,32 @@ fn cli() -> Command {
                         .required(true),
                 ),
         )
+        .subcommand(
+            Command::new("commit")
+                .about("Record changes to the repository")
+                .arg(
+                    arg!(-m --message <message>)
+                        .value_parser(clap::value_parser!(String))
+                        .required(false),
+                ),
+        )
+        .subcommand(
+            Command::new("log").about("Show commit logs").arg(
+                arg!(-f --from <revision>)
+                    .value_parser(clap::value_parser!(String))
+                    .required(false),
+            ),
+        )
+        .subcommand(
+            // TODO: not branches, right now :)
+            Command::new("checkout")
+                .about("Switch branches or restore working tree files")
+                .arg(
+                    arg!(<commit> "The commit ID where to move")
+                        .value_parser(clap::value_parser!(String))
+                        .required(true),
+                ),
+        )
 }
 
 fn main() {
@@ -79,6 +106,41 @@ fn main() {
         }
         Some(("read-tree", sm)) => {
             tree::read_tree(sm.get_one::<String>("tree").unwrap());
+        }
+        Some(("commit", sm)) => {
+            let message = match sm.get_one::<String>("message") {
+                Some(v) => v.to_owned(),
+                None => match commit::editor() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        println!("commit: fatal: {}", e);
+                        std::process::exit(1);
+                    }
+                },
+            };
+
+            commit::commit(message);
+        }
+        Some(("log", sm)) => {
+            let revision = match sm.get_one::<String>("from") {
+                Some(v) => v.to_owned(),
+                None => {
+                    let working_dir = init::working_dir();
+                    let revision = commit::get_head(&working_dir);
+
+                    if revision.is_empty() {
+                        println!("fatal: current branch has no commit yet");
+                        std::process::exit(1);
+                    }
+
+                    revision
+                }
+            };
+
+            commit::log(&revision);
+        }
+        Some(("checkout", sm)) => {
+            commit::checkout(sm.get_one::<String>("commit").unwrap());
         }
         Some((command, _)) => {
             println!(

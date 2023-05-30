@@ -11,6 +11,7 @@ pub enum Kind {
     None,
     Blob,
     Tree,
+    Commit,
 }
 
 impl fmt::Display for Kind {
@@ -19,6 +20,7 @@ impl fmt::Display for Kind {
             Kind::None => write!(f, "none"),
             Kind::Blob => write!(f, "blob"),
             Kind::Tree => write!(f, "tree"),
+            Kind::Commit => write!(f, "commit"),
         }
     }
 }
@@ -31,6 +33,7 @@ impl std::str::FromStr for Kind {
             "none" => Ok(Kind::None),
             "blob" => Ok(Kind::Blob),
             "tree" => Ok(Kind::Tree),
+            "commit" => Ok(Kind::Commit),
             _ => Ok(Kind::None),
         }
     }
@@ -73,14 +76,14 @@ pub fn hash(path: &Path, kind: Kind, verbose: bool) -> String {
     // header beforehand to store stuff like the type of the object. The header
     // is then delimited by a \x00 byte.
     let contents = &std::fs::read_to_string(path).unwrap_or_else(|e| {
-        println!("Could not read file: {}", e);
+        println!("could not read file '{}': {}", &path.display(), e);
         std::process::exit(1);
     });
 
     let res = hash_contents(contents, kind);
     if verbose {
         println!(
-            "Stored given file {} into the object database",
+            "stored given file {} into the object database",
             path.display()
         );
     }
@@ -115,7 +118,7 @@ pub fn get(object: &String) -> Result<Object, String> {
 
 pub fn cat(object: &String) {
     match get(object) {
-        Ok(res) => print!("Kind: {}\nContents:\n{}", res.kind, res.contents),
+        Ok(res) => print!("Kind: {}\nContents:\n{}\n", res.kind, res.contents),
         Err(e) => {
             println!("{}", e);
             std::process::exit(1);
