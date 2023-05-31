@@ -96,6 +96,7 @@ fn cli() -> Command {
                         ),
                 ),
         )
+        .subcommand(Command::new("graph").about("Show a graph with the history of the repository"))
 }
 
 fn main() {
@@ -188,6 +189,10 @@ fn main() {
             }
             _ => unreachable!(),
         },
+        Some(("graph", _sm)) => {
+            let working_dir = init::working_dir();
+            commit::graph(&working_dir);
+        }
         Some((command, _)) => {
             println!(
                 "ruc: «{}» is not a valid command. See «ruc --help».",

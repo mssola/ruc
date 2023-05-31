@@ -8,6 +8,7 @@ use std::io::prelude::*;
 use std::io::Read;
 use std::path::Path;
 use std::process;
+use std::process::{Command, Stdio};
 
 pub fn editor() -> Result<String, &'static str> {
     let program = match env::var("EDITOR") {
@@ -144,6 +145,7 @@ fn get_commit(id: &String) -> Result<Commit, String> {
 pub fn log(from: &String) {
     let mut id = from.to_owned();
 
+    // TODO: build a commit iterator, so it can be used here and on `graph`.
     loop {
         if let Ok(commit) = get_commit(&id) {
             println!("commit {}\n\n{}", commit.id, commit.contents);
@@ -179,4 +181,57 @@ pub fn create_tag(name: &String, id: &String) {
     let working_dir = init::working_dir();
 
     update_ref(&working_dir, &format!("refs/tags/{}", name), id);
+}
+
+pub fn graph(working_dir: &Path) {
+    let paths = fs::read_dir(working_dir.join(init::RUC_DIR).join("refs").join("tags")).unwrap();
+    let mut dot = String::from("digraph commits {\n");
+    let mut commits = vec![];
+
+    // First of all, iterate over the different references that we have.
+    for path in paths {
+        let file = path.unwrap();
+        let fname = file.file_name();
+        let name = fname.to_str().unwrap();
+        let rf = get_ref(working_dir, &format!("refs/tags/{}", &name.to_string()));
+
+        commits.push(rf.clone());
+
+        dot.push_str(format!("\"{}\" [shape=note]\n", &name).as_str());
+        dot.push_str(format!("\"{}\" -> \"{}\"\n", &name, rf).as_str());
+    }
+
+    // And given the found tags, iterate over the commits being pointed at.
+    for mut commit_id in commits {
+        // NOTE: see comment on `log` for iterating on commits.
+        loop {
+            if let Ok(commit) = get_commit(&commit_id) {
+                let abbreved = commit_id.get(0..12).unwrap_or(&commit_id);
+                dot.push_str(
+                    format!(
+                        "\"{}\" [shape=box style=filled label=\"{}\"]\n",
+                        commit_id, abbreved
+                    )
+                    .as_str(),
+                );
+
+                match commit.parent {
+                    Some(parent) => {
+                        dot.push_str(format!("\"{}\" -> \"{}\"", commit_id, parent).as_str());
+                        commit_id = parent.to_owned();
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+
+    dot.push('}');
+
+    let dot_command = Command::new("dot")
+        .args(["-Tgtk"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    write!(dot_command.stdin.unwrap(), "{}", dot).unwrap();
 }
