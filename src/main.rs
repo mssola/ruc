@@ -1,7 +1,6 @@
-mod commit;
-mod init;
-mod object;
-mod tree;
+use ruc::{commit, init, object, tree};
+
+use anyhow::{bail, Result};
 
 use clap::{arg, Command};
 use std::path::PathBuf;
@@ -99,7 +98,7 @@ fn cli() -> Command {
         .subcommand(Command::new("graph").about("Show a graph with the history of the repository"))
 }
 
-fn main() {
+fn main() -> Result<()> {
     let matches = cli().get_matches();
 
     match matches.subcommand() {
@@ -109,79 +108,63 @@ fn main() {
                 Some(name) => name,
                 None => &cur,
             };
-            init::init(dir);
+            init::init(dir)?;
         }
         Some(("hash-object", sm)) => {
             object::hash(
                 sm.get_one::<PathBuf>("file").unwrap(),
                 object::Kind::Blob,
                 true,
-            );
+            )?;
         }
         Some(("cat-file", sm)) => {
-            let working_dir = init::working_dir();
-            let oid = commit::ref_to_oid(&working_dir, sm.get_one::<String>("object").unwrap());
+            let oid = commit::ref_to_oid(sm.get_one::<String>("object").unwrap())?;
 
-            object::cat(&oid);
+            object::cat(&oid)?;
         }
         Some(("write-tree", _sm)) => {
             let cur = std::env::current_dir().unwrap();
-            tree::write_tree(cur.as_path());
+            tree::write_tree(cur.as_path())?;
         }
         Some(("read-tree", sm)) => {
-            let working_dir = init::working_dir();
-            let oid = commit::ref_to_oid(&working_dir, sm.get_one::<String>("tree").unwrap());
+            let oid = commit::ref_to_oid(sm.get_one::<String>("tree").unwrap())?;
 
-            tree::read_tree(&oid);
+            tree::read_tree(&oid)?;
         }
         Some(("commit", sm)) => {
             let message = match sm.get_one::<String>("message") {
                 Some(v) => v.to_owned(),
-                None => match commit::editor() {
-                    Ok(v) => v,
-                    Err(e) => {
-                        println!("commit: fatal: {}", e);
-                        std::process::exit(1);
-                    }
-                },
+                None => commit::editor()?,
             };
 
-            commit::commit(message);
+            commit::commit(message)?;
         }
         Some(("log", sm)) => {
-            let working_dir = init::working_dir();
-
             let revision = match sm.get_one::<String>("from") {
-                Some(v) => commit::ref_to_oid(&working_dir, v),
+                Some(v) => commit::ref_to_oid(v)?,
                 None => {
-                    let revision = commit::get_ref(&working_dir, &String::from("HEAD"));
+                    let revision = commit::get_ref(&String::from("HEAD"))?;
 
                     if revision.is_empty() {
-                        println!("fatal: current branch has no commit yet");
-                        std::process::exit(1);
+                        bail!("current branch has no commit yet");
                     }
 
                     revision
                 }
             };
 
-            commit::log(&revision);
+            commit::log(&revision)?;
         }
         Some(("checkout", sm)) => {
-            let working_dir = init::working_dir();
-            let oid = commit::ref_to_oid(&working_dir, sm.get_one::<String>("commit").unwrap());
+            let oid = commit::ref_to_oid(sm.get_one::<String>("commit").unwrap())?;
 
-            commit::checkout(&oid);
+            commit::checkout(&oid)?;
         }
         Some(("tag", sub)) => match sub.subcommand() {
             Some(("-a", sm)) => {
-                let mut commit = sm.get_one::<String>("commit").unwrap().to_owned();
-                if commit == "HEAD" {
-                    let working_dir = init::working_dir();
-                    commit = commit::get_ref(&working_dir, &String::from("HEAD"));
-                }
+                let commit = commit::ref_to_oid(sm.get_one::<String>("commit").unwrap())?;
 
-                commit::create_tag(sm.get_one::<String>("name").unwrap(), &commit);
+                commit::create_tag(sm.get_one::<String>("name").unwrap(), &commit)?;
             }
             Some((command, _)) => {
                 println!("unknown option {} for the 'tag' command", command);
@@ -190,8 +173,7 @@ fn main() {
             _ => unreachable!(),
         },
         Some(("graph", _sm)) => {
-            let working_dir = init::working_dir();
-            commit::graph(&working_dir);
+            commit::graph()?;
         }
         Some((command, _)) => {
             println!(
@@ -201,4 +183,6 @@ fn main() {
         }
         _ => unreachable!(),
     }
+
+    Ok(())
 }

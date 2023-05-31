@@ -1,24 +1,27 @@
-use crate::init;
+use crate::init::WORKING_DIR;
 use crate::object;
 
+use anyhow::{bail, Context, Result};
 use std::fs;
 use std::fs::{DirEntry, File};
 use std::io::prelude::*;
-use std::io::{Error, ErrorKind};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-fn should_be_ignored(entry: &DirEntry, working_dir: &Path) -> bool {
-    // TODO: pass along an "option" struct that is passed through all commands.
-    let ignored_entries = vec![".ruc", ".git", "target", "tests"];
+lazy_static! {
+    // TODO: properly initialize this.
+    static ref IGNORED_ENTRIES: Vec<&'static str> = vec![".ruc", ".git", "target", "tests"];
+}
+
+fn should_be_ignored(entry: &DirEntry) -> bool {
     let path = entry.path();
 
-    match path.strip_prefix(working_dir) {
+    match path.strip_prefix(WORKING_DIR.to_owned()) {
         Ok(en) => {
             if let Some(base) = en.components().next() {
                 if let Some(raw) = base.as_os_str().to_str() {
-                    for ignored in ignored_entries {
+                    for ignored in IGNORED_ENTRIES.iter().copied() {
                         if raw == ignored {
                             return true;
                         }
@@ -39,21 +42,21 @@ pub struct TreeEntry {
     path: String,
 }
 
-pub fn traverse_write_tree(path: &Path, working_dir: &Path) -> std::io::Result<String> {
+pub fn traverse_write_tree(path: &Path) -> Result<String> {
     let mut entries: Vec<TreeEntry> = vec![];
 
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
 
-        if should_be_ignored(&entry, working_dir) {
+        if should_be_ignored(&entry) {
             continue;
         }
 
         // Try to get the path relative to the working directory. This way it's
         // easier to migrate from different databases.
         let entry_path_full = entry.path();
-        let entry_path = match entry_path_full.strip_prefix(working_dir) {
+        let entry_path = match entry_path_full.strip_prefix(WORKING_DIR.to_owned()) {
             Ok(ep) => ep,
             Err(_) => entry_path_full.as_path(),
         }
@@ -63,13 +66,13 @@ pub fn traverse_write_tree(path: &Path, working_dir: &Path) -> std::io::Result<S
         // below, otherwise we can just hash the file.
         if file_type.is_dir() {
             entries.push(TreeEntry {
-                id: traverse_write_tree(&entry.path(), working_dir)?,
+                id: traverse_write_tree(&entry.path())?,
                 kind: object::Kind::Tree,
                 path: entry_path.unwrap().to_string(),
             });
         } else {
             entries.push(TreeEntry {
-                id: object::hash(&entry.path(), object::Kind::Blob, false),
+                id: object::hash(&entry.path(), object::Kind::Blob, false)?,
                 kind: object::Kind::Blob,
                 path: entry_path.unwrap().to_string(),
             });
@@ -83,22 +86,18 @@ pub fn traverse_write_tree(path: &Path, working_dir: &Path) -> std::io::Result<S
         a + &format!("{} {} {}", b.kind, b.id, b.path) + "\n"
     });
 
-    Ok(object::hash_contents(&contents, object::Kind::Tree))
+    object::hash_contents(&contents, object::Kind::Tree)
 }
 
-pub fn write_tree(path: &Path) {
-    let wd = init::working_dir();
+pub fn write_tree(path: &Path) -> Result<()> {
+    traverse_write_tree(path)?;
 
-    match traverse_write_tree(path, &wd) {
-        Ok(_) => println!("Stored tree from {}", path.display()),
-        Err(e) => println!(
-            "write-tree: fatal: left inconsistent because of the error: {}",
-            e
-        ),
-    }
+    println!("Stored tree from {}", path.display());
+
+    Ok(())
 }
 
-fn get_entries(contents: &str) -> Result<Vec<TreeEntry>, std::io::Error> {
+fn get_entries(contents: &str) -> Result<Vec<TreeEntry>> {
     let mut error = false;
 
     let res = contents
@@ -118,18 +117,14 @@ fn get_entries(contents: &str) -> Result<Vec<TreeEntry>, std::io::Error> {
         .collect::<Vec<_>>();
 
     if error {
-        return Err(Error::new(ErrorKind::Other, "badly formatted tree!"));
+        bail!("badly formatted tree!");
     }
 
     Ok(res)
 }
 
-pub fn read_blob(blob: &TreeEntry) -> std::io::Result<()> {
-    // TODO: properly handle the error...
-    let obj = object::get(&blob.id).unwrap_or_else(|e| {
-        println!("read-tree: failed to read blob: {}", e);
-        std::process::exit(1);
-    });
+pub fn read_blob(blob: &TreeEntry) -> Result<()> {
+    let obj = object::get(&blob.id)?;
 
     if let Some(dir) = Path::new(&blob.path).parent() {
         if !dir.as_os_str().is_empty() {
@@ -143,17 +138,17 @@ pub fn read_blob(blob: &TreeEntry) -> std::io::Result<()> {
     Ok(())
 }
 
-fn empty_directory(dir: &PathBuf, wd: &PathBuf) -> std::io::Result<()> {
+fn empty_directory(dir: &PathBuf) -> Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
 
-        if should_be_ignored(&entry, wd) {
+        if should_be_ignored(&entry) {
             continue;
         }
 
         if file_type.is_dir() {
-            empty_directory(&entry.path(), wd).ok();
+            empty_directory(&entry.path()).ok();
         } else {
             fs::remove_file(entry.path())?;
         }
@@ -162,37 +157,30 @@ fn empty_directory(dir: &PathBuf, wd: &PathBuf) -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn traverse_read_tree(tree: &String) {
-    match object::get(tree) {
-        Ok(obj) => {
-            if obj.kind != object::Kind::Tree {
-                println!("read-tree: wrong object for {}", tree);
-                std::process::exit(1);
-            }
-
-            match get_entries(&obj.contents) {
-                Ok(entries) => {
-                    for parsed in entries {
-                        match parsed.kind {
-                            object::Kind::Tree => traverse_read_tree(&parsed.id),
-                            object::Kind::Blob => read_blob(&parsed).unwrap_or_else(|e| {
-                                println!("read-tree: failed to read blob {}: {}", parsed.id, e);
-                                std::process::exit(1);
-                            }),
-                            _ => println!("SHOULD NOT HAPPEN!"),
-                        };
-                    }
-                }
-                Err(e) => println!("read-tree failed: {}", e),
-            }
-        }
-        Err(e) => println!("read-tree failed: {}", e),
+pub fn traverse_read_tree(tree: &String) -> Result<()> {
+    let obj = object::get(tree)?;
+    if obj.kind != object::Kind::Tree {
+        bail!("object '{}' is not a tree!", tree);
     }
+
+    let entries = get_entries(&obj.contents)
+        .with_context(|| format!("while fetching entries for tree '{}'", tree))?;
+
+    for parsed in entries {
+        match parsed.kind {
+            object::Kind::Tree => traverse_read_tree(&parsed.id)?,
+            object::Kind::Blob => read_blob(&parsed).with_context(|| "while reading blob")?,
+            _ => bail!("unknown error!"),
+        };
+    }
+
+    Ok(())
 }
 
-pub fn read_tree(tree: &String) {
-    let working_dir = init::working_dir();
-    empty_directory(&working_dir, &working_dir).ok();
+pub fn read_tree(tree: &String) -> Result<()> {
+    empty_directory(&WORKING_DIR).ok();
 
-    traverse_read_tree(tree);
+    traverse_read_tree(tree)?;
+
+    Ok(())
 }

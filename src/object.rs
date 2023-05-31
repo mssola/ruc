@@ -1,4 +1,5 @@
-use crate::init;
+use crate::init::{RUC_DIR, WORKING_DIR};
+use anyhow::{bail, Context, Result};
 use sha1::{Digest, Sha1};
 use std::fmt;
 use std::fs::File;
@@ -45,8 +46,7 @@ pub struct Object {
     pub contents: String,
 }
 
-pub fn hash_contents(contents: &String, kind: Kind) -> String {
-    let working_dir = init::working_dir();
+pub fn hash_contents(contents: &String, kind: Kind) -> Result<String> {
     let text = kind.to_string() + std::str::from_utf8(&[b'\x00']).unwrap() + contents;
 
     // Hash it with SHA1 as in Git.
@@ -55,32 +55,22 @@ pub fn hash_contents(contents: &String, kind: Kind) -> String {
     let hashed = format!("{:x}", hasher.finalize());
 
     // And store it in plain text, no compressing nor fancy splitting like Git does.
-    let op = working_dir
-        .join(init::RUC_DIR)
-        .join("objects")
-        .join(&hashed);
-    let mut file = File::create(op).unwrap_or_else(|e| {
-        println!("Could not store object: {}", e);
-        std::process::exit(1);
-    });
-    file.write_all(text.as_bytes()).unwrap_or_else(|e| {
-        println!("Could not store object: {}", e);
-        std::process::exit(1);
-    });
+    let op = WORKING_DIR.join(RUC_DIR).join("objects").join(&hashed);
+    let mut file =
+        File::create(op).with_context(|| format!("while creating object {} in store", &hashed))?;
+    file.write_all(text.as_bytes())
+        .with_context(|| format!("while saving object {} in store", &hashed))?;
 
-    hashed
+    Ok(hashed)
 }
 
-pub fn hash(path: &Path, kind: Kind, verbose: bool) -> String {
-    // The object will be saved in plain text out of simplicity, but there is a
-    // header beforehand to store stuff like the type of the object. The header
-    // is then delimited by a \x00 byte.
-    let contents = &std::fs::read_to_string(path).unwrap_or_else(|e| {
-        println!("could not read file '{}': {}", &path.display(), e);
-        std::process::exit(1);
-    });
+pub fn hash(path: &Path, kind: Kind, verbose: bool) -> Result<String> {
+    // NOTE: The object will be saved in plain text out of simplicity, but there
+    // is a header beforehand to store stuff like the type of the object. The
+    // header is then delimited by a \x00 byte.
+    let contents = &std::fs::read_to_string(path)?;
 
-    let res = hash_contents(contents, kind);
+    let res = hash_contents(contents, kind)?;
     if verbose {
         println!(
             "stored given file {} into the object database",
@@ -88,40 +78,32 @@ pub fn hash(path: &Path, kind: Kind, verbose: bool) -> String {
         );
     }
 
-    res
+    Ok(res)
 }
 
-pub fn get(object: &String) -> Result<Object, String> {
-    let path = init::working_dir()
-        .join(init::RUC_DIR)
-        .join("objects")
-        .join(object);
+pub fn get(object: &String) -> Result<Object> {
+    let path = WORKING_DIR.join(RUC_DIR).join("objects").join(object);
+    let contents =
+        std::fs::read_to_string(path).context(format!("while reading 'objects/{}'", object))?;
 
-    match std::fs::read_to_string(path) {
-        Ok(contents) => {
-            let v: Vec<&str> = contents
-                .splitn(2, std::str::from_utf8(&[b'\x00']).unwrap())
-                .collect();
+    let v: Vec<&str> = contents
+        .splitn(2, std::str::from_utf8(&[b'\x00']).unwrap())
+        .collect();
 
-            if v.len() != 2 {
-                return Err(format!("Bad format for object {}", object));
-            }
-
-            Ok(Object {
-                kind: Kind::from_str(v[0]).unwrap(),
-                contents: v[1].to_string(),
-            })
-        }
-        Err(e) => Err(format!("Failed to read given object: {}", e)),
+    if v.len() != 2 {
+        bail!("bad format for object {}", object);
     }
+
+    Ok(Object {
+        kind: Kind::from_str(v[0]).unwrap(),
+        contents: v[1].to_string(),
+    })
 }
 
-pub fn cat(object: &String) {
-    match get(object) {
-        Ok(res) => print!("Kind: {}\nContents:\n{}\n", res.kind, res.contents),
-        Err(e) => {
-            println!("{}", e);
-            std::process::exit(1);
-        }
-    }
+pub fn cat(object: &String) -> Result<()> {
+    let res = get(object)?;
+
+    print!("Kind: {}\nContents:\n{}\n", res.kind, res.contents);
+
+    Ok(())
 }

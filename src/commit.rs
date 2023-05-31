@@ -1,108 +1,123 @@
-use crate::init;
+use crate::init::{RUC_DIR, WORKING_DIR};
 use crate::object;
 use crate::tree;
 
+use anyhow::{bail, Context, Result};
 use std::env;
 use std::fs;
 use std::io::prelude::*;
 use std::io::Read;
-use std::path::Path;
 use std::process;
 use std::process::{Command, Stdio};
 
-pub fn editor() -> Result<String, &'static str> {
+pub fn editor() -> Result<String> {
     let program = match env::var("EDITOR") {
         Ok(v) => v,
-        Err(_) => return Err("could not get the default EDITOR"),
+        Err(_) => bail!("could not get the default EDITOR"),
     };
 
-    let path = init::working_dir()
-        .join(init::RUC_DIR)
-        .join("COMMIT_EDITMSG");
+    let path = WORKING_DIR.join(RUC_DIR).join("COMMIT_EDITMSG");
     fs::File::create(&path).expect("could not create temporary file for editing the message");
 
-    process::Command::new(program)
-        .arg(&path)
-        .status()
-        .expect("editor exitted with bad value");
+    process::Command::new(program).arg(&path).status()?;
 
     let mut editable = String::new();
-    fs::File::open(&path)
-        .expect("could not open temporary file for editing the message")
-        .read_to_string(&mut editable)
-        .expect("could not read temporary file for editing the message");
-
-    fs::remove_file(path).expect("could not remove temporary file for editing the message");
+    fs::File::open(&path)?.read_to_string(&mut editable)?;
+    fs::remove_file(path)?;
 
     Ok(editable.trim_end().to_owned())
 }
 
-pub fn commit(message: String) {
-    let working_dir = init::working_dir();
+pub fn commit(message: String) -> Result<()> {
+    let id = tree::traverse_write_tree(&WORKING_DIR)?;
 
-    match tree::traverse_write_tree(&working_dir, &working_dir) {
-        Ok(id) => {
-            let parent_id = get_ref(&working_dir, &String::from("HEAD"));
-            let contents = if parent_id.is_empty() {
-                format!("tree {}\n\n{}", id, message)
-            } else {
-                format!("tree {}\nparent {}\n\n{}", id, parent_id, message)
-            };
-            let commit_id = object::hash_contents(&contents, object::Kind::Commit);
-            update_ref(&working_dir, &String::from("HEAD"), &commit_id);
-        }
-        Err(e) => println!(
-            "commit: fatal: left inconsistent because of the error: {}",
-            e
-        ),
-    }
+    let parent_id = get_ref(&String::from("HEAD"))?;
+    let contents = if parent_id.is_empty() {
+        format!("tree {}\n\n{}", id, message)
+    } else {
+        format!("tree {}\nparent {}\n\n{}", id, parent_id, message)
+    };
+
+    let commit_id = object::hash_contents(&contents, object::Kind::Commit)?;
+    update_ref(&String::from("HEAD"), &commit_id)?;
+
+    Ok(())
 }
 
-pub fn ref_to_oid(working_dir: &Path, name: &String) -> String {
+pub fn ref_to_oid(name: &String) -> Result<String> {
     for path in &["", "refs/", "refs/tags/", "refs/heads/"] {
-        let full_path = working_dir.join(init::RUC_DIR).join(path).join(name);
+        let full_path = WORKING_DIR.join(RUC_DIR).join(path).join(name);
 
         if full_path.exists() {
-            return get_ref(working_dir, &format!("{}{}", path, name));
+            return get_ref(&format!("{}{}", path, name));
         }
     }
-    name.to_owned()
+
+    Ok(name.to_owned())
 }
 
-pub fn get_ref(working_dir: &Path, name: &String) -> String {
-    let ref_file = working_dir.join(init::RUC_DIR).join(name);
+pub fn get_ref(name: &String) -> Result<String> {
+    let ref_file = WORKING_DIR.join(RUC_DIR).join(name);
 
     match std::fs::read_to_string(ref_file) {
-        Ok(contents) => contents,
+        Ok(contents) => Ok(contents),
         Err(e) => match e.kind() {
-            std::io::ErrorKind::NotFound => String::new(),
-            _ => {
-                println!("fatal: could not get the current value for {}!", name);
-                std::process::exit(1);
-            }
+            std::io::ErrorKind::NotFound => Ok(String::new()),
+            _ => bail!(format!("could not get the current value for {}!", name)),
         },
     }
 }
 
-pub fn update_ref(working_dir: &Path, name: &String, commit_id: &String) {
-    let ref_file = working_dir.join(init::RUC_DIR).join(name);
+pub fn update_ref(name: &String, commit_id: &String) -> Result<()> {
+    let ref_file = WORKING_DIR.join(RUC_DIR).join(name);
 
-    let mut file = fs::File::create(ref_file).unwrap_or_else(|e| {
-        println!("could not save {} state: {}", name, e);
-        std::process::exit(1);
-    });
-    file.write_all(commit_id.as_bytes()).unwrap_or_else(|e| {
-        println!("could not save {} state: {}", name, e);
-        std::process::exit(1);
-    });
+    let mut file =
+        fs::File::create(ref_file).with_context(|| format!("could not save {} state", name))?;
+    file.write_all(commit_id.as_bytes())
+        .with_context(|| format!("could not save {} state", name))?;
+
+    Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Commit {
     pub id: String,
     pub tree: String,
     pub parent: Option<String>,
     pub contents: String,
+}
+
+impl Iterator for Commit {
+    type Item = Commit;
+
+    fn next(&mut self) -> Option<Commit> {
+        match &self.parent {
+            Some(parent) => match get_commit(parent) {
+                Ok(commit) => {
+                    *self = commit;
+                    Some(self.to_owned())
+                }
+                Err(e) => {
+                    println!("failed to fetch commit {}", e);
+                    None
+                }
+            },
+            None => None,
+        }
+    }
+}
+
+impl Commit {
+    // Creates an empty commit with the given string as the ID of its parent.
+    // This way it can be iterated through the Commit Iterator.
+    fn iter_as_parent(from: &String) -> Commit {
+        Commit {
+            id: String::new(),
+            tree: String::new(),
+            parent: Some(from.to_owned()),
+            contents: String::new(),
+        }
+    }
 }
 
 fn parse_header_element(element: Option<&str>, key: &str) -> Option<String> {
@@ -119,72 +134,59 @@ fn parse_header_element(element: Option<&str>, key: &str) -> Option<String> {
     }
 }
 
-fn get_commit(id: &String) -> Result<Commit, String> {
-    match object::get(id) {
-        Ok(obj) => {
-            let mut lines = obj.contents.lines();
-            let tree = parse_header_element(lines.next(), "tree").unwrap();
-            let parent = parse_header_element(lines.next(), "parent");
+fn get_commit(id: &String) -> Result<Commit> {
+    let obj = object::get(id).with_context(|| format!("while getting commit {}", id))?;
 
-            if parent.is_some() {
-                lines.next();
-            }
-            let contents = lines.fold(String::new(), |acc, x| format!("{}{}", acc, x));
+    let mut lines = obj.contents.lines();
+    let tree = parse_header_element(lines.next(), "tree").unwrap();
+    let parent = parse_header_element(lines.next(), "parent");
 
-            Ok(Commit {
-                id: id.to_owned(),
-                tree,
-                parent,
-                contents,
-            })
-        }
-        Err(e) => Err(format!("could not get commit {}: {}", id, e)),
+    if parent.is_some() {
+        lines.next();
     }
+    let contents = lines.fold(String::new(), |acc, x| format!("{}{}", acc, x));
+
+    Ok(Commit {
+        id: id.to_owned(),
+        tree,
+        parent,
+        contents,
+    })
 }
 
-pub fn log(from: &String) {
-    let mut id = from.to_owned();
+pub fn log(from: &String) -> Result<()> {
+    let mut first = true;
 
-    // TODO: build a commit iterator, so it can be used here and on `graph`.
-    loop {
-        if let Ok(commit) = get_commit(&id) {
-            println!("commit {}\n\n{}", commit.id, commit.contents);
-
-            match commit.parent {
-                Some(parent) => {
-                    id = parent.to_owned();
-                    println!();
-                }
-                None => break,
-            }
+    for commit in Commit::iter_as_parent(from) {
+        if !first {
+            println!();
         }
+
+        println!("commit {}\n\n{}", commit.id, commit.contents);
+
+        first = false;
     }
+
+    Ok(())
 }
 
-pub fn checkout(id: &String) {
-    let working_dir = init::working_dir();
-    let res = get_commit(id);
+pub fn checkout(id: &String) -> Result<()> {
+    let commit = get_commit(id)?;
 
-    match res {
-        Ok(commit) => {
-            tree::read_tree(&commit.tree);
-            update_ref(&working_dir, &String::from("HEAD"), id);
-        }
-        Err(e) => {
-            println!("{}", e);
-            std::process::exit(1);
-        }
-    }
+    tree::read_tree(&commit.tree)?;
+
+    update_ref(&String::from("HEAD"), id)?;
+    Ok(())
 }
 
-pub fn create_tag(name: &String, id: &String) {
-    let working_dir = init::working_dir();
+pub fn create_tag(name: &String, id: &String) -> Result<()> {
+    update_ref(&format!("refs/tags/{}", name), id)?;
 
-    update_ref(&working_dir, &format!("refs/tags/{}", name), id);
+    Ok(())
 }
 
-pub fn graph(working_dir: &Path) {
-    let paths = fs::read_dir(working_dir.join(init::RUC_DIR).join("refs").join("tags")).unwrap();
+pub fn graph() -> Result<()> {
+    let paths = fs::read_dir(WORKING_DIR.join(RUC_DIR).join("refs").join("tags")).unwrap();
     let mut dot = String::from("digraph commits {\n");
     let mut commits = vec![];
 
@@ -193,7 +195,7 @@ pub fn graph(working_dir: &Path) {
         let file = path.unwrap();
         let fname = file.file_name();
         let name = fname.to_str().unwrap();
-        let rf = get_ref(working_dir, &format!("refs/tags/{}", &name.to_string()));
+        let rf = get_ref(&format!("refs/tags/{}", &name.to_string()))?;
 
         commits.push(rf.clone());
 
@@ -201,27 +203,19 @@ pub fn graph(working_dir: &Path) {
         dot.push_str(format!("\"{}\" -> \"{}\"\n", &name, rf).as_str());
     }
 
-    // And given the found tags, iterate over the commits being pointed at.
-    for mut commit_id in commits {
-        // NOTE: see comment on `log` for iterating on commits.
-        loop {
-            if let Ok(commit) = get_commit(&commit_id) {
-                let abbreved = commit_id.get(0..12).unwrap_or(&commit_id);
-                dot.push_str(
-                    format!(
-                        "\"{}\" [shape=box style=filled label=\"{}\"]\n",
-                        commit_id, abbreved
-                    )
-                    .as_str(),
-                );
+    for commit_id in commits {
+        for commit in Commit::iter_as_parent(&commit_id) {
+            let abbreved = commit.id.get(0..12).unwrap_or(&commit.id);
+            dot.push_str(
+                format!(
+                    "\"{}\" [shape=box style=filled label=\"{}\"]\n",
+                    commit.id, abbreved
+                )
+                .as_str(),
+            );
 
-                match commit.parent {
-                    Some(parent) => {
-                        dot.push_str(format!("\"{}\" -> \"{}\"", commit_id, parent).as_str());
-                        commit_id = parent.to_owned();
-                    }
-                    None => break,
-                }
+            if let Some(parent) = commit.parent {
+                dot.push_str(format!("\"{}\" -> \"{}\"", commit.id, parent).as_str());
             }
         }
     }
@@ -232,6 +226,8 @@ pub fn graph(working_dir: &Path) {
         .args(["-Tgtk"])
         .stdin(Stdio::piped())
         .spawn()
-        .unwrap();
-    write!(dot_command.stdin.unwrap(), "{}", dot).unwrap();
+        .with_context(|| "while running the `dot` command")?;
+    write!(dot_command.stdin.unwrap(), "{}", dot)?;
+
+    Ok(())
 }

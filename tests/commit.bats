@@ -19,7 +19,7 @@ setup() {
 @test "log detects that no commits have been performed" {
     ruc log
 
-    [ "$output" = "fatal: current branch has no commit yet" ]
+    [ "$output" = "Error: current branch has no commit yet" ]
 }
 
 @test "log prints different commits in order" {
